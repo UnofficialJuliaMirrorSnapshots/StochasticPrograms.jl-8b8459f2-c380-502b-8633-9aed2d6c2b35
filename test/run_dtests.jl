@@ -25,10 +25,12 @@ problems = Vector{Tuple{StochasticProgram,SPResult,String}}()
 @info "Loading test problems..."
 @info "Loading simple..."
 include("simple.jl")
+@info "Loading instant simple..."
+include("instant_simple.jl")
 @info "Loading farmer..."
 include("farmer.jl")
-@info "Preparing simple sampler..."
-include("sampling.jl")
+@info "Loading sampler..."
+include("sampler.jl")
 @info "Test problems loaded. Starting test sequence."
 
 @testset "Distributed Stochastic Programs" begin
@@ -38,7 +40,7 @@ include("sampling.jl")
         add_scenarios!(sp_nondist, scenarios(sp))
         optimize!(sp_nondist,solver=GLPKSolverLP())
         @test scenariotype(sp) == scenariotype(sp_nondist)
-        @test abs(probability(sp)-probability(sp_nondist)) <= 1e-6
+        @test abs(stage_probability(sp)-stage_probability(sp_nondist)) <= 1e-6
         @test nscenarios(sp) == nscenarios(sp_nondist)
         @test nscenarios(sp) == length(scenarios(sp))
         @test nsubproblems(sp) == nsubproblems(sp_nondist)
@@ -78,29 +80,22 @@ include("sampling.jl")
         @test abs(VSS(sp_copy)-VSS(sp)) <= 1e-2
         @test abs(EV(sp_copy)-EV(sp)) <= 1e-2
         @test abs(EEV(sp_copy)-EEV(sp)) <= 1e-2
-        add_scenario!(sp_copy, scenario(sp, 1))
-        @test nscenarios(sp_copy) == nscenarios(sp) + 1
     end
     @testset "Distributed Sampling" begin
-        sampled_sp = SAA(simple_model, SimpleSampler(), 100, solver=GLPKSolverLP())
+        sampled_sp = SAA(simple_model, sampler, 100, solver=GLPKSolverLP())
         @test nscenarios(sampled_sp) == 100
         @test nsubproblems(sampled_sp) == 100
-        @test abs(probability(sampled_sp)-1.0) <= 1e-6
-        sample!(sampled_sp, SimpleSampler(), 100)
+        @test abs(stage_probability(sampled_sp)-1.0) <= 1e-6
+        sample!(sampled_sp, sampler, 100)
         @test nscenarios(sampled_sp) == 200
         @test nsubproblems(sampled_sp) == 200
-        @test abs(probability(sampled_sp)-1.0) <= 1e-6
+        @test abs(stage_probability(sampled_sp)-1.0) <= 1e-6
     end
     @testset "Distributed confidence intervals" begin
-        sampler = SimpleSampler()
         glpk = GLPKSolverLP()
-        L, U = confidence_interval(simple_model, sampler, N = 100, M = 10, confidence = 0.95, solver = glpk)
-        @test L <= U
-        saa = SAA(simple_model, sampler, 100)
-        optimize!(saa, solver = glpk)
-        x̂ = optimal_decision(saa)
-        Q,_ = evaluate_decision(simple_model, x̂, sampler, solver = glpk)
-        @test L <= Q
-        @test Q <= U
+        CI = confidence_interval(simple_model, sampler, N = 100, M = 10, confidence = 0.95, solver = glpk)
+        @test lower(CI) <= upper(CI)
+        sol = optimize(simple_model, sampler, solver = glpk, confidence = 0.95)
+        @test lower(confidence_interval(sol)) <= upper(confidence_interval(sol))
     end
 end

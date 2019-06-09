@@ -31,11 +31,50 @@ In the second stage, the farmer needs to know the required quantity of each crop
 second_stage_data = (Required, PurchasePrice, SellPrice)
 ```
 The uncertainty lies in the future yield of each crop. We define a scenario type to capture this:
-```@example farmer
+```julia
 @scenario Yield = begin
     wheat::Float64
     corn::Float64
     beets::Float64
+end
+```
+All of the above definitions can be included directly in the definition of the stochastic model of the farmer problem. Consider
+```@example farmer
+farmer_model = @stochastic_model begin
+    @stage 1 begin
+        @parameters begin
+            Crops = [:wheat, :corn, :beets]
+            Cost = Dict(:wheat=>150, :corn=>230, :beets=>260)
+            Budget = 500
+        end
+        @variable(model, x[c = Crops] >= 0)
+        @objective(model, Min, sum(Cost[c]*x[c] for c in Crops))
+        @constraint(model, sum(x[c] for c in Crops) <= Budget)
+    end
+    @stage 2 begin
+        @decision x
+        @parameters begin
+            Purchased  = [:wheat, :corn]
+            Sold = [:wheat, :corn, :bquota, :bextra]
+            Required = Dict(:wheat=>200, :corn=>240, :beets=>0)
+            PurchasePrice = Dict(:wheat=>238, :corn=>210)
+            SellPrice = Dict(:wheat=>170, :corn=>150, :bquota=>36, :bextra=>10)
+        end
+        @uncertain ξ::YieldScenario = begin
+            wheat::Float64
+            corn::Float64
+            beets::Float64
+        end
+        @variable(model, y[p = Purchased] >= 0)
+        @variable(model, w[s = Sold] >= 0)
+        @objective(model, Min, sum( PurchasePrice[p] * y[p] for p = Purchased) - sum( SellPrice[s] * w[s] for s in Sold))
+
+        @constraint(model, const_minreq[p=Purchased],
+            ξ[p] * x[p] + y[p] - w[p] >= Required[p])
+        @constraint(model, const_minreq_beets,
+            ξ[:beets] * x[:beets] - w[:bquota] - w[:bextra] >= Required[:beets])
+        @constraint(model, const_aux, w[:bquota] <= 6000)
+    end
 end
 ```
 The three predicted outcomes can be defined through:
@@ -44,32 +83,7 @@ The three predicted outcomes can be defined through:
 ξ₂ = YieldScenario(2.5, 3.0, 20.0, probability = 1/3)
 ξ₃ = YieldScenario(2.0, 2.4, 16.0, probability = 1/3)
 ```
-Now, we create a stochastic model:
-```@example farmer
-farmer_model = StochasticModel((Crops,Cost,Budget), (Required,PurchasePrice,SellPrice), (sp)->begin
-    @first_stage sp = begin
-        (Crops,Cost,Budget) = stage
-        @variable(model, x[c = Crops] >= 0)
-        @objective(model, Min, sum(Cost[c]*x[c] for c in Crops))
-        @constraint(model, sum(x[c] for c in Crops) <= Budget)
-    end
-    @second_stage sp = begin
-        @decision x
-        (Required, PurchasePrice, SellPrice) = stage
-        ξ = scenario
-        @variable(model, y[p = Purchased] >= 0)
-        @variable(model, w[s = Sold] >= 0)
-        @objective(model, Min, sum( PurchasePrice[p] * y[p] for p = Purchased) - sum( SellPrice[s] * w[s] for s in Sold))
-
-        @constraint(model, const_minreq[p=Purchased],
-            ξ[p] * x[p] + y[p] - w[p] >= Required[p])
-        @constraint(model, const_minreq_beets,
-            ξ[:beets] * x[:beets] - w[:beets_quota] - w[:beets_extra] >= Required[:beets])
-        @constraint(model, const_aux, w[:beets_quota] <= 6000)
-    end
-end)
-```
-Finally, we instantate a stochastic program using the 3 yield scenarios:
+We can now instantiate the farmer problem using the defined stochastic model and the three yield scenarios:
 ```@example farmer
 farmer = instantiate(farmer_model, [ξ₁,ξ₂,ξ₃])
 ```
@@ -102,7 +116,7 @@ As an example, consider the following generalized stochastic program:
 \end{aligned}
 ```
 where ``\xi(\omega)`` is exponentially distributed. We will skip the mathematical details here and just take for granted that the optimizer to the above problem is the mean of the exponential distribution. We will try to approximately solve this problem using sample average approximation. First, lets try to introduce a custom discrete scenario type that models a stochastic variable with a continuous probability distribution. Consider the following implementation:
-```@example custom
+```julia
 using StochasticPrograms
 using Distributions
 
@@ -125,7 +139,7 @@ end
 The fallback [`probability`](@ref) method is viable as long as the scenario type contains a [`Probability`](@ref) field named `probability`. The implementation of [`expected`](@ref) is somewhat unconventional as it returns the mean of the distribution regardless of how many scenarios are given.
 
 We can implement a sampler that generates exponentially distributed scenarios as follows:
-```@example custom
+```julia
 struct ExponentialSampler <: AbstractSampler{DistributionScenario{Exponential{Float64}}}
     distribution::Exponential
 
@@ -141,44 +155,41 @@ Now, lets attempt to define the generalized stochastic program using the availab
 ```julia
 using Ipopt
 
-model = StochasticModel((sp) -> begin
-	@first_stage sp = begin
-		@variable(model, x)
-	end
-
-	@second_stage sp = begin
-		@decision x
-		ξ = scenario.ξ
-		@variable(model, y)
-		@constraint(model, y == (x - ξ)^2)
-		@objective(model, Min, y)
-	end
-end)
+sm = @stochastic_model begin
+    @stage 1 begin
+        @variable(model, x)
+    end
+    @stage 2 begin
+        @decision x
+        @uncertain ξ from DistributionScenario
+        @variable(model, y)
+        @constraint(model, y == (x - ξ)^2)
+        @objective(model, Min, y)
+    end
+end
 ```
 ```julia
-Stochastic Model
+Two-Stage Stochastic Model
 
-minimize cᵀx + 𝔼[Q(x,ξ)]
-  x∈ℝⁿ  Ax = b
-         x ≥ 0
+minimize f₀(x) + 𝔼[f(x,ξ)]
+  x∈𝒳
 
 where
 
-Q(x,ξ) = min  q(ξ)ᵀy
-        y∈ℝᵐ T(ξ)x + Wy = h(ξ)
-              y ≥ 0
+f(x,ξ) = min  f(y; x, ξ)
+              y ∈ 𝒴 (x, ξ)
 ```
 The mean of the given exponential distribution is ``2.0``, which is the optimal solution to the general problem. Now, lets create a finite SAA model of 1000 exponentially distributed numbers:
 ```julia
 sampler = ExponentialSampler(2.) # Create a sampler
 
-saa = SAA(model, sampler, 1000) # Sample 1000 exponentially distributed scenarios and create an SAA model
+saa = SAA(sm, sampler, 1000) # Sample 1000 exponentially distributed scenarios and create an SAA model
 ```
 ```julia
 Stochastic program with:
- * 1000 scenarios of type DistributionScenario
  * 1 decision variable
  * 1 recourse variable
+ * 1000 scenarios of type DistributionScenario
 Solver is default solver
 ```
 By the law of large numbers, we approach the generalized formulation with increasing sample size. Solving yields:

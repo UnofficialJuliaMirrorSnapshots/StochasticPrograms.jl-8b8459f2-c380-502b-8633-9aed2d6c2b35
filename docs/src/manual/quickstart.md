@@ -13,7 +13,7 @@ using StochasticPrograms
 
 ## Stochastic programs
 
-A two-stage linear stochastic program has the following mathematical representation:
+Consider some probability space ``(\Omega,\mathcal{F},\pi)`` where ``\Omega`` is a sample space, ``\mathcal{F}`` is a ``\sigma``-algebra over ``\Omega`` and ``\pi: \mathcal{F} \to [0,1]`` is a probability measure. Let ``\xi(\omega): \Omega \to \mathbb{R}^{N}`` be some random variable on ``\Omega`` with finite second moments. A two-stage linear stochastic program has the following mathematical representation:
 ```math
 \DeclareMathOperator*{\minimize}{minimize}
 \begin{aligned}
@@ -30,7 +30,7 @@ where
     & \quad y \geq 0
   \end{aligned}
 ```
-If the sample space ``\Omega`` is finite, stochastic program has a closed form that can be represented on a computer. Such functionality is provided by StochasticPrograms. If the sample space ``\Omega`` is infinite, sampling techniques can be used to represent the stochastic program using finite [SAA](@ref) instances.
+If the sample space ``\Omega`` is finite, stochastic program has a closed form that can be represented on a computer. Such functionality is provided by StochasticPrograms. If the sample space ``\Omega`` is infinite, sampling techniques can be used to represent the stochastic program using finite [`SAA`](@ref) instances.
 
 ## A simple stochastic program
 
@@ -73,66 +73,51 @@ with probability ``0.4`` and
     -28 & -32 & 300 & 300
   \end{pmatrix}^T
 ```
-with probability ``0.6``. In the following, we consider how to model, analyze, and solve this stochastic program using StochasticPrograms.
-
-## Scenario definition
-
-First, we introduce a scenario type that can encompass the scenarios ``\xi_1`` and ``\xi_2`` above. This can be achieved conviently through the `@scenario` macro:
+with probability ``0.6``. In the following, we consider how to model, analyze, and solve this stochastic program using StochasticPrograms. In many examples, a MathProgBase solver is required. Hence, we load the GLPK solver.
 ```@example simple
-@scenario Simple = begin
-    q₁::Float64
-    q₂::Float64
-    d₁::Float64
-    d₂::Float64
+using GLPKMathProgInterface
+```
+
+## Stochastic model definition
+
+First, we define a stochastic model that describes the introduced stochastic program above.
+
+```@example simple
+simple_model = @stochastic_model begin
+    @stage 1 begin
+        @variable(model, x₁ >= 40)
+        @variable(model, x₂ >= 20)
+        @objective(model, Min, 100*x₁ + 150*x₂)
+        @constraint(model, x₁ + x₂ <= 120)
+    end
+    @stage 2 begin
+        @decision x₁ x₂
+        @uncertain q₁ q₂ d₁ d₂
+        @variable(model, 0 <= y₁ <= d₁)
+        @variable(model, 0 <= y₂ <= d₂)
+        @objective(model, Min, q₁*y₁ + q₂*y₂)
+        @constraint(model, 6*y₁ + 10*y₂ <= 60*x₁)
+        @constraint(model, 8*y₁ + 5*y₂ <= 80*x₂)
+    end
 end
 ```
-Now, ``\xi_1`` and ``\xi_2`` can be created through:
+The optimization models in the first and second stage are defined using JuMP syntax inside `@stage` blocks. Every first-stage variable that occurs in the second stage model is annotated with `@decision` at the beginning of the definition. Moreover, the `@uncertain` annotation specifies that the variables `q₁`, `q₂`, `d₁` and `d₂` are uncertain. Instances of the uncertain variables will later be injected to create instances of the second stage model.
+
+## Instantiating the stochastic program
+
+Next, we create the two instances ``\xi_1`` and ``\xi_2`` of the random variable. For simple models this is conveniently achieved through the [`Scenario`](@ref) type. ``\xi_1`` and ``\xi_2`` can be created as follows:
 ```@example simple
-ξ₁ = SimpleScenario(-24.0, -28.0, 500.0, 100.0, probability = 0.4)
+ξ₁ = Scenario(q₁ = -24.0, q₂ = -28.0, d₁ = 500.0, d₂ = 100.0, probability = 0.4)
 ```
 and
 ```@example simple
-ξ₂ = SimpleScenario(-28.0, -32.0, 300.0, 300.0, probability = 0.6)
+ξ₂ = Scenario(q₁ = -28.0, q₂ = -32.0, d₁ = 300.0, d₂ = 300.0, probability = 0.6)
 ```
-Some useful functionality is automatically made available when introducing scenarios in this way. For example, we can check the discrete probability of a given scenario occuring:
+where the variable names should match those given in the `@uncertain` annotation. We are now ready to instantiate the stochastic program introduced above.
 ```@example simple
-probability(ξ₁)
+sp = instantiate(simple_model, [ξ₁, ξ₂], solver = GLPKSolverLP())
 ```
-Moreover, we can form the expected scenario out of a given set:
-```@example simple
-ξ̄ = expected([ξ₁, ξ₂])
-```
-
-## Stochastic program definition
-
-We are now ready to create a stochastic program based on the introduced scenario type. Optionally, we can also supply a capable MathProgBase solver that can be used internally when necessary. Consider:
-```@example simple
-using GLPKMathProgInterface
-
-sp = StochasticProgram([ξ₁, ξ₂], solver = GLPKSolverLP())
-```
-The above command creates a stochastic program and preloads the two defined scenarios. The provided solver will be used internally when necessary. For clarity, we will still explicitly supply a solver when it is required. Now, we provide model recipes for the first and second stage of the example problem. The first stage is straightforward, and is defined using JuMP syntax inside a `@first_stage` block:
-```@example simple
-@first_stage sp = begin
-    @variable(model, x₁ >= 40)
-    @variable(model, x₂ >= 20)
-    @objective(model, Min, 100*x₁ + 150*x₂)
-    @constraint(model, x₁ + x₂ <= 120)
-end
-```
-The recipe was immediately used to generate an instance of the first-stage model. Next, we give a second stage recipe inside a `@second_stage` block:
-```@example simple
-@second_stage sp = begin
-    @decision x₁ x₂
-    ξ = scenario
-    @variable(model, 0 <= y₁ <= ξ.d₁)
-    @variable(model, 0 <= y₂ <= ξ.d₂)
-    @objective(model, Min, ξ.q₁*y₁ + ξ.q₂*y₂)
-    @constraint(model, 6*y₁ + 10*y₂ <= 60*x₁)
-    @constraint(model, 8*y₁ + 5*y₂ <= 80*x₂)
-end
-```
-Every first-stage variable that occurs in the second stage model is annotated with `@decision` at the beginning of the definition. Moreover, the scenario data is referenced through `scenario`. Instances of the defined scenario `SimpleScenario` will be injected to create instances of the second stage model. The second stage recipe is immediately used to generate second stage models for each preloaded scenario. Hence, the stochastic program definition is complete. We can now print the program and confirm that it indeed models the example recourse problem given above:
+The above command creates an instance of the first stage model and second stage model instances for each of the supplied scenarios. The provided solver will be used internally when necessary. For clarity, we will still explicitly supply a solver when it is required. We can print the stochastic program and confirm that it indeed models the example recourse problem given above:
 ```@example simple
 print(sp)
 ```
@@ -162,9 +147,58 @@ dep = DEP(sp)
 print(dep)
 ```
 
+## Sampled average approximation
+
+In the above, the probability space consists of only two scenarios and the stochastic program can hence be represented in a closed form. If it instead holds that ``\xi`` follows say a normal distribution, then it is no longer possible to represent the full stochastic program since this would require infinite scenarios. We then revert to sampling-based techniques. For example, let ``\xi \sim \mathcal{N}(\mu, \Sigma)`` with
+```math
+\mu = \begin{pmatrix}
+ -28 \\
+ -32 \\
+ 300 \\
+ 300
+\end{pmatrix}, \quad \Sigma = \begin{pmatrix}
+ 2 & 0.5 & 0 & 0 \\
+ 0.5 & 1 & 0 & 0 \\
+ 0 & 0 & 50 & 20 \\
+ 0 & 0 & 20 & 30
+\end{pmatrix}
+```
+To approximate the resulting stochastic program in StochasticPrograms, we first create a sampler object capable of generating scenarios from this distribution. This is most conveniently achieved using the [`@sampler`](@ref) macro:
+```@example simple
+using Distributions
+
+@sampler SimpleSampler = begin
+    N::MvNormal
+
+    SimpleSampler(μ, Σ) = new(MvNormal(μ, Σ))
+
+    @sample Scenario begin
+        x = rand(sampler.N)
+        return Scenario(q₁ = x[1], q₂ = x[2], d₁ = x[3], d₂ = x[4], probability = pdf(sampler.N, x))
+    end
+end
+
+μ = [-28, -32, 300, 300]
+Σ = [2 0.5 0 0
+     0.5 1 0 0
+     0 0 50 20
+     0 0 20 30]
+
+sampler = SimpleSampler(μ, Σ)
+```
+Now, we can use the same stochastic model created before and the created sampler object to generate a stochastic average approximation (SAA) of the stochastic program. For now, we create a small SAA model of just 5 scenarios:
+```@example simple
+saa = SAA(simple_model, sampler, 5)
+```
+Typically, a large number of scenarios are required to accurately represent the stochastic program. We will consider this in more depth below. Let us first also print the SAA model:
+```@example simple
+print(saa)
+```
+In the subsequent discussions, note that `sp` represents the finite simple stochastic program with known closed form, `simple_model` contains the mathematical representation of the general stochastic model, and `saa` are approximated instances of the general model.
+
 ## Evaluate decisions
 
-With the stochastic program defined, we can evaluate the performance of different first-stage decisions. The expected value of a given first-stage decision ``x`` is given by
+Decision evaluation is an important concept in stochastic programming. The expected result of taking a given first-stage decision ``x`` is given by
 ```math
 V(x) = c^T x + \operatorname{\mathbb{E}}_{\omega} \left[Q(x,\xi(\omega))\right]
 ```
@@ -172,20 +206,32 @@ If the sample space is finite, the above expressions has a closed form that is r
 ```@example simple
 x = [40., 20.]
 ```
-The expected result of taking this decision in the simple model can be determined through:
+The expected result of taking this decision in the simple finite model can be determined through:
 ```@example simple
 evaluate_decision(sp, x, solver = GLPKSolverLP())
 ```
 The supplied solver is used to solve all available second stage models, with fixed first-stage values. These outcome models can be built manually by supplying a scenario and the first-stage decision.
 ```@example simple
-print(outcome_model(sp, ξ₁, x))
+print(outcome_model(sp, x, ξ₁))
 ```
 Moreover, we can evaluate the result of the decision in a given scenario, i.e. solving a single outcome model, through:
 ```@example simple
-evaluate_decision(sp, ξ₁, x, solver = GLPKSolverLP())
+evaluate_decision(sp, x, ξ₁, solver = GLPKSolverLP())
 ```
-
-In the sample space is infinite, or if the underlying random variable ``\xi`` is continuous, a first-stage decision can only be evaluated in a stochastic sense. For further reference, consider [`evaluate_decision`](@ref), [`lower_bound`](@ref) and [`confidence_interval`](@ref).
+If the sample space is infinite, or if the underlying random variable ``\xi`` is continuous, a first-stage decision can only be evaluated in a stochastic sense. For example, note the result of evaluating the decision on the SAA model created above:
+```@example simple
+evaluate_decision(saa, x, solver = GLPKSolverLP())
+```
+and compare it to the result of evaluating it on another SAA model of similar size:
+```@example simple
+another_saa = SAA(simple_model, sampler, 5)
+evaluate_decision(another_saa, x, solver = GLPKSolverLP())
+```
+which, if any, of these values should be a candidate for the true value of ``V(x)``? A more precise result is obtained by evaluating the decision using a sampled-based approach. Such querys are instead made to the `simple_model` object by supplying an appropriate [`AbstractSampler`](@ref) and a desired confidence level. Consider:
+```@example simple
+evaluate_decision(simple_model, x, sampler, solver = GLPKSolverLP(), confidence = 0.9)
+```
+The result is a 90% confidence interval around ``V(x)``. Consult [`evaluate_decision`](@ref) for the tweakable parameters that govern the resulting confidence interval.
 
 ## Optimal first-stage decision
 
@@ -210,6 +256,19 @@ This value is commonly referred to as the *value of the recourse problem* (VRP).
 VRP(sp, solver = GLPKSolverLP())
 ```
 
+If the sample space is infinite, or if the underlying random variable ``\xi`` is continuous, the value of the recourse problem can not be computed exactly. However, by supplying an [`AbstractSampler`](@ref) we can use sample-based techniques to compute a confidence interval around the true optimum:
+```@example simple
+confidence_interval(simple_model, sampler, solver = GLPKSolverLP(), confidence = 0.95)
+```
+Similarly, a first-stage decision is only optimal in a stochastic sense. Such solutions can be obtained from running [`optimize`](@ref) on the stochastic model object, supplying a sample-based solver. Sample-based solvers are also outlined in [Structured solvers](@ref). StochasticPrograms includes the [`SAASolver`](@ref), which runs a simple sequential SAA algorithm. Emerging SAA problems are solved by a supplied [`AbstractStructuredSolver`](@ref) or by a `MathProgBase` solver through the extensive form. Consider the following:
+```@example simple
+solution = optimize(simple_model, sampler, solver = SAASolver(GLPKSolverLP()), confidence = 0.95)
+```
+The result is a [`StochasticSolution`](@ref), which includes an optimal solution estimate as well as a confidence interval around the solution. The approximately optimal first-stage decision is obtained by
+```@example simple
+decision(solution)
+```
+
 ## Wait-and-see models
 
 If we assume that we know what the actual outcome will be, we would be interested in the optimal course of action in that scenario. This is the concept of wait-and-see models. For example if ``ξ₁`` is believed to be the actual outcome, we can define a wait-and-see model as follows:
@@ -227,11 +286,11 @@ evaluate_decision(sp, x₁, solver = GLPKSolverLP())
 ```
 The outcome is of course worse than taking the optimal decision. However, it would perform better if ``ξ₁`` is the actual outcome:
 ```@example simple
-evaluate_decision(sp, ξ₁, x₁, solver = GLPKSolverLP())
+evaluate_decision(sp, x₁, ξ₁, solver = GLPKSolverLP())
 ```
 as compared to:
 ```@example simple
-evaluate_decision(sp, ξ₁, x_opt, solver = GLPKSolverLP())
+evaluate_decision(sp, x_opt, ξ₁, solver = GLPKSolverLP())
 ```
 Another important concept is the wait-and-see model corresponding to the expected future scenario. This is referred to as the *expected value problem* and can be generated through:
 ```@example simple
